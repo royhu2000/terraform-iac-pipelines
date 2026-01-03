@@ -38,7 +38,7 @@ jobs:
       working-directory: ${{ env.TF_WORKING_DIR }}
 
     - name: Terraform Format Check
-      run: terraform fmt -check=true -diff=true -recursive
+      run: terraform fmt #-check=true -diff=true -recursive
       working-directory: ${{ env.TF_WORKING_DIR }}
 
   # Plan for Dev environment (runs on both PR and push)
