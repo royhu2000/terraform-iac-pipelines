@@ -1,5 +1,5 @@
 # terraform/environments/dev/terraform.tfvars
-project_name = "roywebapp"
+project_name = "webapp"
 environment  = "dev"
 location     = "East US 2"
 
