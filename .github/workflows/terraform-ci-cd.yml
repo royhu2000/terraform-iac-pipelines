@@ -1,5 +1,5 @@
 # .github/workflows/terraform-ci-cd.yml
-name: 'Terraform CI/CD'
+name: 'Multi-Environment Terraform Deployment'
 
 on:
   push:
@@ -8,128 +8,198 @@ on:
     branches: [ main ]
 
 permissions:
-  id-token: write   # Required for OIDC
-  contents: read    # Required for checkout
+  id-token: write       # Required for OIDC
+  contents: read        # Required for checkout
+  pull-requests: write  # Required for PR comments
+
+env:
+  TF_WORKING_DIR: './terraform'
 
 jobs:
-  # Job 1: Validate & Plan
+  # Validate on all events (push and PR)
   validate:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout
       uses: actions/checkout@v5
 
-    - name: Azure Login using OIDC
-      uses: azure/login@v2
+    - name: Setup Terraform and Init for Dev
+      uses: ./.github/actions/terraform-setup-init
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      # with:
-      #   terraform_version: 1.5.0    # It is recommended to pin to a specific version for production
-
-    # Initialize a backend store for state management
-    - name: Terraform Init with backend
-      run: |
-        terraform init \
-          -backend-config="storage_account_name=tfstates${{ vars.RANDOM_SUFFIX }}" \
-          -backend-config="container_name=iac-workshop-tfstates" \
-          -backend-config="key=terraform-dev.tfstate" \
-          -backend-config="resource_group_name=rg-terraform-state"
-      working-directory: ./terraform
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
 
     - name: Terraform Validate
       run: terraform validate
-      working-directory: ./terraform
+      working-directory: ${{ env.TF_WORKING_DIR }}
 
     - name: Terraform Format Check
       run: terraform fmt -check=true -diff=true -recursive
-      working-directory: ./terraform
+      working-directory: ${{ env.TF_WORKING_DIR }}
 
-  # Job 2: Plan
-  plan:
+  # Plan for Dev environment (runs on both PR and push)
+  plan-dev:
     needs: validate
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout
       uses: actions/checkout@v5
 
-    - name: Azure Login using OIDC
-      uses: azure/login@v2
+    - name: Setup Terraform and Init
+      uses: ./.github/actions/terraform-setup-init
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-
-    # Initialize a backend store for state management
-    - name: Terraform Init with backend
-      run: |
-        terraform init \
-          -backend-config="storage_account_name=tfstates${{ vars.RANDOM_SUFFIX }}" \
-          -backend-config="container_name=iac-workshop-tfstates" \
-          -backend-config="key=terraform-dev.tfstate" \
-          -backend-config="resource_group_name=rg-terraform-state"
-      working-directory: ./terraform
-
-    - name: Terraform Plan
-      run: terraform plan -var-file="environments/dev/terraform.tfvars" -out=plan.tfout
-      working-directory: ./terraform
-
-    - name: Terraform Show
-      run: terraform show -no-color ./plan.tfout
-      working-directory: ./terraform
-
-    - name: Save Plan as Artifact
-      uses: actions/upload-artifact@v4
+    - name: Plan Dev Environment
+      uses: ./.github/actions/terraform-plan
       with:
-        name: tfplan
-        path: ./terraform/plan.tfout
-        retention-days: 1
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
 
-  # Job 3: Deploy to Development
-  deploy:
-    needs: plan
+  # Plan for Prod environment (now runs on both PR and push)
+  plan-prod:
+    needs: validate
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout
       uses: actions/checkout@v5
 
-    - name: Download Plan Artifact
-      uses: actions/download-artifact@v4
+    - name: Setup Terraform and Init
+      uses: ./.github/actions/terraform-setup-init
       with:
-        name: tfplan
-        path: ./terraform/
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'prod'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
 
-    - name: Azure Login using OIDC
-      uses: azure/login@v2
+    - name: Plan Prod Environment
+      uses: ./.github/actions/terraform-plan
       with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'prod'
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+  # Auto-deploy to DEV on push to main
+  deploy-dev:
+    needs: [plan-dev]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: development
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
 
-    # Initialize a backend store for state management
-    - name: Terraform Init with backend
+    - name: Setup Terraform and Init
+      uses: ./.github/actions/terraform-setup-init
+      with:
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
+
+    - name: Apply to Development
+      uses: ./.github/actions/terraform-apply
+      with:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
+
+    - name: Post-deployment validation
       run: |
-        terraform init \
-          -backend-config="storage_account_name=tfstates${{ vars.RANDOM_SUFFIX }}" \
-          -backend-config="container_name=iac-workshop-tfstates" \
-          -backend-config="key=terraform-dev.tfstate" \
-          -backend-config="resource_group_name=rg-terraform-state"
-      working-directory: ./terraform
+        echo "🎉 Development deployment completed successfully!"
+        echo "Environment: Development"
+        echo "Timestamp: $(date)"
+        echo "Commit: ${{ github.sha }}"
 
-    - name: Terraform Apply
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push' # Only apply on push to main branch
-      run: terraform apply -var-file="environments/dev/terraform.tfvars" plan.tfout
-      working-directory: ./terraform
+  # Deploy to PROD with manual approval
+  deploy-prod:
+    needs: [plan-prod, deploy-dev]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Pre-deployment notification
+      run: |
+        echo "🚀 Starting PRODUCTION deployment"
+        echo "⚠️  This deployment affects production systems"
+        echo "Reviewer: ${{ github.triggering_actor }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Changes: ${{ github.event.head_commit.message }}"
+
+    - name: Setup Terraform and Init
+      uses: ./.github/actions/terraform-setup-init
+      with:
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'prod'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
+
+    - name: Apply to Production
+      uses: ./.github/actions/terraform-apply
+      with:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'prod'
+
+    - name: Post-deployment validation
+      run: |
+        echo "✅ Production deployment completed successfully!"
+        echo "Environment: Production"
+        echo "Timestamp: $(date)"
+        echo "Commit: ${{ github.sha }}"
+        echo "Approved by: ${{ github.triggering_actor }}"
+
+  # Comment Dev plan on PRs (using shared action) - runs first
+  comment-plan-dev:
+    needs: [plan-dev]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Comment Dev Plan
+      uses: ./.github/actions/terraform-comment
+      with:
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'dev'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Comment Prod plan on PRs (using shared action) - runs after dev comment
+  comment-plan-prod:
+    needs: [plan-prod, comment-plan-dev]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Comment Prod Plan
+      uses: ./.github/actions/terraform-comment
+      with:
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        environment: 'prod'
+        storage-account-suffix: ${{ vars.RANDOM_SUFFIX }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
